@@ -1,13 +1,15 @@
 import { env } from "cloudflare:workers";
 import type { AuthRequest, OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { Hono } from "hono";
-import { Octokit } from "octokit";
 import { fetchUpstreamAuthToken, getUpstreamAuthorizeUrl, type Props } from "./utils";
 import {
 	clientIdAlreadyApproved,
 	parseRedirectApproval,
 	renderApprovalDialog,
 } from "./workers-oauth-utils";
+import * as jose from "jose";
+
+const JWKS = jose.createRemoteJWKSet(new URL(`${env.AUTH0_ISSUER}/.well-known/jwks.json`));
 
 const app = new Hono<{ Bindings: Env & { OAUTH_PROVIDER: OAuthHelpers } }>();
 
@@ -21,15 +23,15 @@ app.get("/authorize", async (c) => {
 	if (
 		await clientIdAlreadyApproved(c.req.raw, oauthReqInfo.clientId, env.COOKIE_ENCRYPTION_KEY)
 	) {
-		return redirectToGithub(c.req.raw, oauthReqInfo);
+		return redirectToAuth0(c.req.raw, oauthReqInfo);
 	}
 
 	return renderApprovalDialog(c.req.raw, {
 		client: await c.env.OAUTH_PROVIDER.lookupClient(clientId),
 		server: {
-			description: "This is a demo MCP Remote Server using GitHub for authentication.",
+			description: "This is a demo MCP Remote Server using Auth0 for authentication.",
 			logo: "https://avatars.githubusercontent.com/u/314135?s=200&v=4",
-			name: "Cloudflare GitHub MCP Server", // optional
+			name: "Cloudflare Auth0 MCP Server", // optional
 		},
 		state: { oauthReqInfo }, // arbitrary data that flows through the form submission below
 	});
@@ -42,10 +44,10 @@ app.post("/authorize", async (c) => {
 		return c.text("Invalid request", 400);
 	}
 
-	return redirectToGithub(c.req.raw, state.oauthReqInfo, headers);
+	return redirectToAuth0(c.req.raw, state.oauthReqInfo, headers);
 });
 
-async function redirectToGithub(
+async function redirectToAuth0(
 	request: Request,
 	oauthReqInfo: AuthRequest,
 	headers: Record<string, string> = {},
@@ -54,11 +56,12 @@ async function redirectToGithub(
 		headers: {
 			...headers,
 			location: getUpstreamAuthorizeUrl({
-				client_id: env.GITHUB_CLIENT_ID,
+				client_id: env.AUTH0_CLIENT_ID,
 				redirect_uri: new URL("/callback", request.url).href,
-				scope: "read:user",
+				scope: "profile email openid",
 				state: btoa(JSON.stringify(oauthReqInfo)),
-				upstream_url: "https://github.com/login/oauth/authorize",
+				upstream_url: `${env.AUTH0_ISSUER}/authorize`,
+				audience: env.AUTH0_AUDIENCE,
 			}),
 		},
 		status: 302,
@@ -68,7 +71,7 @@ async function redirectToGithub(
 /**
  * OAuth Callback Endpoint
  *
- * This route handles the callback from GitHub after user authentication.
+ * This route handles the callback from Auth0 after user authentication.
  * It exchanges the temporary code for an access token, then stores some
  * user metadata & the auth token as part of the 'props' on the token passed
  * down to the client. It ends by redirecting the client back to _its_ callback URL
@@ -82,17 +85,25 @@ app.get("/callback", async (c) => {
 
 	// Exchange the code for an access token
 	const [accessToken, errResponse] = await fetchUpstreamAuthToken({
-		client_id: c.env.GITHUB_CLIENT_ID,
-		client_secret: c.env.GITHUB_CLIENT_SECRET,
+		client_id: c.env.AUTH0_CLIENT_ID,
+		client_secret: c.env.AUTH0_CLIENT_SECRET,
 		code: c.req.query("code"),
 		redirect_uri: new URL("/callback", c.req.url).href,
-		upstream_url: "https://github.com/login/oauth/access_token",
+		upstream_url: `${c.env.AUTH0_ISSUER}/oauth/token`,
+		grant_type: "authorization_code",
 	});
 	if (errResponse) return errResponse;
 
-	// Fetch the user info from GitHub
-	const user = await new Octokit({ auth: accessToken }).rest.users.getAuthenticated();
-	const { login, name, email } = user.data;
+
+	if (!accessToken) {
+		return c.text("Failed to get access token", 500);
+	}
+	console.log("Got access token", { accessToken });
+	// decode by jwt
+	const decoded = await jose.jwtVerify(accessToken, JWKS);
+	const user = decoded.payload as { sub: string; name: string; email: string; };
+
+	const { name, email } = user;
 
 	// Return back to the MCP client a new token
 	const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
@@ -103,15 +114,14 @@ app.get("/callback", async (c) => {
 		props: {
 			accessToken,
 			email,
-			login,
 			name,
 		} as Props,
 		request: oauthReqInfo,
 		scope: oauthReqInfo.scope,
-		userId: login,
+		userId: email,
 	});
 
 	return Response.redirect(redirectTo);
 });
 
-export { app as GitHubHandler };
+export { app as Auth0Handler };

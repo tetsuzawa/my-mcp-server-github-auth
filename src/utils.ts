@@ -15,12 +15,14 @@ export function getUpstreamAuthorizeUrl({
 	scope,
 	redirect_uri,
 	state,
+	audience
 }: {
 	upstream_url: string;
 	client_id: string;
 	scope: string;
 	redirect_uri: string;
 	state?: string;
+	audience: string;
 }) {
 	const upstream = new URL(upstream_url);
 	upstream.searchParams.set("client_id", client_id);
@@ -28,6 +30,7 @@ export function getUpstreamAuthorizeUrl({
 	upstream.searchParams.set("scope", scope);
 	if (state) upstream.searchParams.set("state", state);
 	upstream.searchParams.set("response_type", "code");
+	upstream.searchParams.set("audience", audience);
 	return upstream.href;
 }
 
@@ -49,30 +52,34 @@ export async function fetchUpstreamAuthToken({
 	code,
 	redirect_uri,
 	upstream_url,
+	grant_type,
 }: {
 	code: string | undefined;
 	upstream_url: string;
 	client_secret: string;
 	redirect_uri: string;
 	client_id: string;
+	grant_type: string;
 }): Promise<[string, null] | [null, Response]> {
 	if (!code) {
 		return [null, new Response("Missing code", { status: 400 })];
 	}
 
+	console.log("Fetching token from upstream", { upstream_url, client_id, redirect_uri, grant_type });
 	const resp = await fetch(upstream_url, {
-		body: new URLSearchParams({ client_id, client_secret, code, redirect_uri }).toString(),
+		body: new URLSearchParams({ client_id, client_secret, code, redirect_uri, grant_type }).toString(),
 		headers: {
 			"Content-Type": "application/x-www-form-urlencoded",
 		},
 		method: "POST",
 	});
+	console.log("Upstream response", resp.status, resp.statusText);
 	if (!resp.ok) {
 		console.log(await resp.text());
 		return [null, new Response("Failed to fetch access token", { status: 500 })];
 	}
-	const body = await resp.formData();
-	const accessToken = body.get("access_token") as string;
+	const body = await resp.json() as { access_token: string, scope: string, token_type: string , expires_in: number};
+	const accessToken = body.access_token as string;
 	if (!accessToken) {
 		return [null, new Response("Missing access token", { status: 400 })];
 	}
