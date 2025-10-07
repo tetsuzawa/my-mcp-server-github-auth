@@ -17,6 +17,7 @@ type Props = {
 const ALLOWED_EMAILS = new Set<string>([
   // Add email addresses of users who should have access to the image generation tool
   // For example: 'youremail@example.com', 'coworkeremail@example.com'
+  "tetsu.varmos@gmail.com"
 ]);
 
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
@@ -33,7 +34,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 
     // Use the upstream access token to facilitate tools
     this.server.tool(
-      "secretMultiply",
+      "multiply",
       "Multiply two numbers, but only if you are authenticated",
       { a: z.number(), b: z.number() },
       async ({ a, b }) => {
@@ -45,9 +46,10 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 
     // Dynamically add tools based on the user's login. In this case, I want to limit
     // access to my Image Generation tool to just me
-    if (ALLOWED_EMAILS.has(this.props!.email)) {
+	console.log("User props", this.props);
+    if (ALLOWED_EMAILS.has(this.props?.email || "definitely not found")) {
       this.server.tool(
-        "generateImage",
+        "secretGenerateImage",
         "Generate an image using the `flux-1-schnell` model. Works best with 8 steps.",
         {
           prompt: z.string().describe("A text description of the image you want to generate."),
